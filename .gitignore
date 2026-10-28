@@ -1,0 +1,10 @@
+node_modules/
+.pnpm-store/
+dist/
+.env
+.env.*
+!.env.example
+data/
+*.sqlite*
+*.log
+artifacts/

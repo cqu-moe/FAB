@@ -1,0 +1,10 @@
+.git
+node_modules
+.pnpm-store
+dist
+data
+artifacts
+.env
+.env.*
+*.sqlite*
+*.log
