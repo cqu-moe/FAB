@@ -1,18 +1,20 @@
-FROM node:22-bookworm-slim AS build
+FROM node:22-bookworm-slim AS base
+RUN corepack enable && corepack prepare pnpm@11.19.0 --activate
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY .design ./.design
+
+FROM base AS build
+RUN pnpm install --frozen-lockfile
 COPY tsconfig.json vite.config.ts index.html ./
 COPY src ./src
-RUN npm run build
+RUN pnpm build
 
-FROM node:22-bookworm-slim
+FROM base
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=3030
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev && mkdir -p /app/data && chown node:node /app/data
+RUN pnpm install --prod --frozen-lockfile && mkdir -p /app/data && chown node:node /app/data
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/src ./src
 USER node
 EXPOSE 3030
-CMD ["npm", "start"]
+CMD ["node", "--env-file-if-exists=.env", "--import", "tsx", "src/server/index.ts"]

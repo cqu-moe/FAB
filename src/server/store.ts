@@ -86,8 +86,8 @@ export class Store {
     });
   }
   insertRecord(r: Omit<StoredRecord,'id'|'createdAt'|'error'|'outcome'|'recalled'>) {
-    this.db.prepare(`INSERT OR IGNORE INTO records(group_id,kind,external_id,member_openid,username,content,payload,reason,decision,status,created_at,occurred_at,automatic,revision,person_id)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(r.groupId,r.kind,r.externalId,r.memberOpenid,r.username,r.content,r.payload,r.reason,r.decision,r.status,Date.now(),r.occurredAt,Number(r.automatic),r.revision,r.personId);
+    return this.db.prepare(`INSERT OR IGNORE INTO records(group_id,kind,external_id,member_openid,username,content,payload,reason,decision,status,created_at,occurred_at,automatic,revision,person_id)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(r.groupId,r.kind,r.externalId,r.memberOpenid,r.username,r.content,r.payload,r.reason,r.decision,r.status,Date.now(),r.occurredAt,Number(r.automatic),r.revision,r.personId).changes>0;
   }
   finish(id: number, status: RecordStatus, outcome: string | null, error: string | null = null) {
     this.db.prepare('UPDATE records SET status=?,outcome=?,error=? WHERE id=?').run(status,outcome,error,id);

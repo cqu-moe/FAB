@@ -55,6 +55,7 @@ export const joinEventSchema = z.object({
   join_request_id: z.string().min(1).max(2048),
   username: z.string().max(200).default(''), risk_tips: z.string().max(1000).default(''),
   apply_at: z.string().optional(), apply_source: z.string().optional(),
+  invited_by: z.union([opaqueId,z.literal('')]).optional(), bot: z.boolean().optional(),
   auto_approved: z.object({ strategy_id: z.string() }).optional(),
   verify_info: z.object({
     method: z.string(), verify_message: z.string().max(10000).optional(),

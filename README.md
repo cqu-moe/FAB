@@ -4,19 +4,25 @@
 
 ## 本地启动
 
-需要 Node.js 22.13+（本地验证版本 22.22.3）。Node 22 的 `node:sqlite` 会显示实验性 API 提示。
+需要 pnpm 11.19.0 和 Node.js 22.13+（本地验证版本 22.22.3）。Node 22 的 `node:sqlite` 会显示实验性 API 提示。
 
 ```sh
-npm ci
+pnpm install --frozen-lockfile
 cp .env.example .env
 # 编辑 .env，为 ADMIN_PASSWORD 设置独立的随机密码（至少 16 字符）
-npm run build
-npm start
+pnpm build
+pnpm start
 ```
 
 打开 <http://127.0.0.1:3030>，使用 `ADMIN_PASSWORD` 登录。QQ 凭据可先留空：人员名单、群规则和规则预览可独立使用，真实审批和撤回会明确显示未配置。
 
-开发界面时，在 `.env` 将 `APP_ORIGIN` 改为 `http://127.0.0.1:5173`，分别运行 `npm run dev` 和 `npm run dev:web`。正式静态构建则使用 3030 对应的来源。请求来源必须与此配置一致，不能用 `localhost` 和 `127.0.0.1` 混用来绕开校验。
+开发界面时，在 `.env` 将 `APP_ORIGIN` 改为 `http://127.0.0.1:5173`，分别运行 `pnpm dev` 和 `pnpm dev:web`。正式静态构建则使用 3030 对应的来源。请求来源必须与此配置一致，不能用 `localhost` 和 `127.0.0.1` 混用来绕开校验。
+
+## 界面与设计系统
+
+使用随仓库分发的 CQU Moe theme/ui 1.1.0（`.design/*.tgz`）与 Lucide 1.48.0；锁文件和 theme override 由 pnpm 管理。沿用原有 React/Vite 版本，不从公共 registry 获取同名设计包。
+
+全局只有一个 ThemeProvider 和 Toaster，主题支持浅色、深色和跟随系统。Vite 在首帧注入包内主题脚本，服务端 CSP 只允许该脚本的 SHA-256，不开放任意内联脚本。业务 CSS 只使用共享语义变量，Tailwind reset 位于 base 层，避免覆盖组件样式。
 
 ## 接入 QQ
 
@@ -74,7 +80,8 @@ npm start
 ## 运行与数据
 
 - 数据默认保存在 `data/fab.sqlite`，使用 WAL。首次创建的数据目录权限为 0700。请保护数据库、`.env` 及备份；SQLite 本身没有透明加密。
-- 群配置、名单、记录和队列持久化；不保存普通未命中消息正文。签名回调按群和请求/消息 ID 去重。
+- 群配置、名单、记录和队列持久化；不保存普通未命中消息正文。消息按群和消息 ID 去重。QQ 入群申请在回调和拉取时可能返回不同请求 ID，因此还按群、成员、合法申请时间及验证信息等字段比对已有记录，保留首次收到的原始审批 ID；重复拉取只统计实际新增记录，不重新执行已处理或结果未知的申请。
+- 同一申请的风险提示变化时保留两份材料，暂停尚未执行的自动审批并转人工。平台时间精度内内容完全相同的两次真实重申请无法区分；缺失或非法申请时间时仅按请求 ID 去重。这里的字段比对不等于官方提供的稳定申请 ID。
 - 数据库绑定首次配置的 QQ AppID，更换机器人须使用独立数据库，避免跨应用混用 OpenID。更新同一机器人的 AppSecret 后重启即可。
 - 处理记录（包括待复核内容）默认保留 30 天，可通过 `RETENTION_DAYS` 设置 1–365 天；去重标识保留 7 天。名单不会自动清除。
 - 服务启动时，未完成的“执行中”操作转为失败并要求核对 QQ，不盲目重放可能已生效的动作。失败请求不会自动无限重试。
@@ -88,9 +95,10 @@ npm start
 ## 检查
 
 ```sh
-npm run typecheck
-npm test
-npm run build
+pnpm typecheck
+pnpm test
+pnpm build
+pnpm check:design
 ```
 
 测试使用腾讯公开签名向量、真实 SQLite 和 HTTP 应用边界；QQ 外部响应采用严格模拟，覆盖鉴权、来源校验、签名篡改、重复事件、名单匹配、跨群隔离、CSV 原子性、处置失败、过期消息和白名单同步顺序。通过这些检查不等于已在真实 QQ 账号上验证。

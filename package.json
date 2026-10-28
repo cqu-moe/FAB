@@ -2,17 +2,24 @@
   "name": "fab-qq-manager",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@11.19.0",
   "type": "module",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "dev": "node --watch --env-file-if-exists=.env --import tsx src/server/index.ts",
     "dev:web": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "start": "node --env-file-if-exists=.env --import tsx src/server/index.ts",
     "test": "node --import tsx --test tests/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:design": "node node_modules/@cqu-moe/ui/dist/check-design.mjs src/web"
   },
   "dependencies": {
+    "@cqu-moe/theme": "file:./.design/cqu-moe-theme-1.1.0.tgz",
+    "@cqu-moe/ui": "file:./.design/cqu-moe-ui-1.1.0.tgz",
+    "lucide-react": "1.48.0",
     "@hono/node-server": "^1.19.0",
     "hono": "^4.9.0",
     "react": "^19.1.0",
@@ -21,6 +28,7 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "tailwindcss": "4.3.3",
     "@types/node": "^22.18.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",

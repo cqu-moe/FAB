@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { themeInitScript } from '@cqu-moe/theme';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { secureHeaders } from 'hono/secure-headers';
@@ -33,7 +34,8 @@ export function createApp(store:Store, engine:Engine, config:AppConfig) {
   if(previousPassword?.value!==passwordHash) store.db.prepare('DELETE FROM sessions').run();
   store.db.prepare("INSERT OR REPLACE INTO metadata(key,value) VALUES('admin_password_hash',?)").run(passwordHash);
   let loginFailures:number[]=[];
-  app.use('*',secureHeaders({contentSecurityPolicy:{defaultSrc:["'self'"],scriptSrc:["'self'"],styleSrc:["'self'"],imgSrc:["'self'",'data:'],objectSrc:["'none'"],frameAncestors:["'none'"],baseUri:["'self'"],formAction:["'self'"]}}));
+  const themeHash = `'sha256-${createHash('sha256').update(themeInitScript).digest('base64')}'`;
+  app.use('*',secureHeaders({contentSecurityPolicy:{defaultSrc:["'self'"],scriptSrc:["'self'",themeHash],styleSrc:["'self'"],imgSrc:["'self'",'data:'],objectSrc:["'none'"],frameAncestors:["'none'"],baseUri:["'self'"],formAction:["'self'"]}}));
   app.use('*',bodyLimit({maxSize:2_000_000,onError:c=>c.json({error:'请求超过大小限制'},413)}));
   app.use('/api/*',async(c,next)=>{
     c.header('Cache-Control','no-store');

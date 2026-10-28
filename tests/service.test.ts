@@ -37,7 +37,7 @@ function fixture(path=':memory:') {
 const application=(member='MEMBER_A',request='REQUEST_A',name='示例同学',student='00123')=>({group_openid:'GROUP_A',member_openid:member,join_request_id:request,username:'申请人',verify_info:{method:'admin_review_qa',review_qa_list:[{question:'姓名',answer:name},{question:'学号',answer:student}]}});
 const message=(id='MESSAGE_A',content='外链 https://spam.example/path',extra={})=>({group_openid:'GROUP_A',id,timestamp:new Date().toISOString(),author:{member_openid:'MEMBER_A',username:'成员',member_role:'member',bot:false},content,...extra});
 
-function fakeQQ(t: TestContext, fail?:string) {
+function fakeQQ(t: TestContext, fail?:string, requests:unknown[]=[]) {
   const calls:{path:string;method:string;body:Record<string,unknown>|null}[]=[];
   t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL,init?:RequestInit)=>{
     const url=new URL(String(input)); assert.equal(url.origin,'https://api.bot.qq.com');
@@ -46,6 +46,7 @@ function fakeQQ(t: TestContext, fail?:string) {
     if(url.pathname==='/app/getAppAccessToken') return Response.json({access_token:'fake-provider-token',expires_in:7200});
     assert.equal(new Headers(init?.headers).get('authorization'),'QQBot fake-provider-token');
     if(fail && url.pathname.includes(fail)) return Response.json({err_code:11253,message:'upstream-sensitive-content'}, {status:200});
+    if(url.pathname.endsWith('/join_request_list')) return Response.json({list:requests,next_cursor:''});
     if(url.pathname==='/v2/groups/join_approval_strategy' && init?.method==='POST') return Response.json({strategy_id:'STRATEGY_A'});
     return Response.json({});
   });
@@ -71,6 +72,10 @@ test('admin session is required, cookies are protected, cross-origin writes fail
     assert.equal((await f.request('/api/groups')).status,401);
     const login=await f.login();
     assert.match(login.headers.get('set-cookie')!,/HttpOnly/); assert.match(login.headers.get('set-cookie')!,/Secure/); assert.match(login.headers.get('set-cookie')!,/SameSite=Strict/);
+    const csp = login.headers.get('content-security-policy')!;
+    // Distributed theme 1.1.0 bootstrap bytes: allow this script without opening inline execution.
+    assert.ok(csp.includes("script-src 'self' 'sha256-pGI4JF4weer5IV5s0GKD85T+pt/KZtsoq6wwZ50vLlQ='"));
+    assert.ok(!csp.includes("'unsafe-inline'") && !csp.includes("'unsafe-eval'"));
     assert.equal((await f.request('/api/groups','POST',{id:'GROUP_A',name:'测试'},{origin:'https://evil.test'})).status,403);
     assert.equal((await f.request('/api/groups')).headers.get('cache-control'),'no-store');
     await f.request('/api/logout','POST',{});
@@ -134,6 +139,115 @@ test('signed matching admission persists before ACK, executes once, and prevents
     await f.event('GROUP_JOIN_REQUEST',application('MEMBER_C','REQUEST_C','其他姓名','00123'));
     assert.equal(f.store.records('GROUP_A')[0].status,'review');
   } finally {f.store.close();}
+});
+
+test('callback and pulled copies of one admission stay one record and execute once despite different QQ request IDs',async t=>{
+  for(const first of ['callback','pull'] as const) await t.test(first,async t=>{
+    const f=fixture();
+    const event={...application(),apply_at:'2026-10-28T13:46:11+08:00',apply_source:'self_apply',verify_info:{method:'verify_message',verify_message:'姓名：示例同学\n学号：00123'}};
+    const pulled={...event,join_request_id:'PULLED_REQUEST',apply_at:'2026-10-28T05:46:11Z',verify_info:{...event.verify_info,review_qa_list:[]}};
+    const calls=fakeQQ(t,undefined,[pulled]);
+    try {
+      await f.login(); await f.group('GROUP_A',{enabled:true,joinMode:'auto'});
+      await f.request('/api/groups/GROUP_A/roster','POST',{people:[{name:'示例同学',studentId:'00123'}]});
+      if(first==='callback') await f.event('GROUP_JOIN_REQUEST',event);
+      const response=await f.request('/api/groups/GROUP_A/requests/pull','POST',{});
+      assert.equal(response.status,200);
+      if(first==='pull') await f.event('GROUP_JOIN_REQUEST',event);
+      let detail=await (await f.request('/api/groups/GROUP_A')).json();
+      assert.equal(detail.records.length,1,'one application must be shown once across callback and pull');
+      assert.equal((await response.json()).count,first==='pull'?1:0);
+      await f.engine.drain();
+      await f.event('GROUP_JOIN_REQUEST',event);
+      assert.equal((await (await f.request('/api/groups/GROUP_A/requests/pull','POST',{})).json()).count,0);
+      await f.engine.drain();
+      detail=await (await f.request('/api/groups/GROUP_A')).json();
+      assert.equal(detail.records.length,1); assert.equal(detail.records[0].status,'succeeded');
+      const approvals=calls.filter(c=>c.path.includes('/approval_join_request/'));
+      assert.equal(approvals.length,1);
+      assert.equal(approvals[0].body!.join_request_id,first==='callback'?'REQUEST_A':'PULLED_REQUEST');
+      await f.event('GROUP_JOIN_REQUEST',{...event,join_request_id:'NEW_APPLICATION',apply_at:'2026-10-28T13:46:12+08:00'});
+      assert.equal(f.store.records('GROUP_A').length,2,'a later application from the same member remains separate');
+    } finally { f.store.close(); }
+  });
+});
+
+test('admission dedup keeps distinct groups, members and application details separate',async t=>{
+  const original={...application(),apply_at:'2026-10-28T13:46:11+08:00',apply_source:'invited',invited_by:'INVITER_A'};
+  const cases:[string,object][]=[
+    ['group',{group_openid:'GROUP_B'}],
+    ['member',{member_openid:'MEMBER_B'}],
+    ['inviter',{invited_by:'INVITER_B'}],
+    ['answer',{verify_info:{method:'admin_review_qa',review_qa_list:[{question:'姓名',answer:'另一同学'},{question:'学号',answer:'00123'}]}}],
+    ['risk',{risk_tips:'需核对安全风险'}],
+  ];
+  for(const [name,change] of cases) await t.test(name,async()=>{
+    const f=fixture();
+    try {
+      await f.login(); await f.group(); await f.group('GROUP_B');
+      await f.event('GROUP_JOIN_REQUEST',original);
+      await f.event('GROUP_JOIN_REQUEST',{...original,...change,join_request_id:'ANOTHER_REQUEST'});
+      const all=[...f.store.records('GROUP_A'),...f.store.records('GROUP_B')];
+      assert.equal(all.length,2);
+      assert.ok(all.every(record=>record.status==='review'));
+    } finally { f.store.close(); }
+  });
+  for(const apply_at of [undefined,'invalid']) await t.test(`missing stable time: ${apply_at}`,async()=>{
+    const f=fixture();
+    try {
+      await f.login(); await f.group();
+      await f.event('GROUP_JOIN_REQUEST',{...original,apply_at});
+      await f.event('GROUP_JOIN_REQUEST',{...original,apply_at,join_request_id:'ANOTHER_REQUEST'});
+      assert.equal(f.store.records('GROUP_A').length,2);
+    } finally { f.store.close(); }
+  });
+});
+
+test('a pulled duplicate never resets or retries an approval whose result is unknown',async t=>{
+  const f=fixture();
+  const event={...application(),apply_at:'2026-10-28T13:46:11+08:00'};
+  const calls=fakeQQ(t,undefined,[{...event,join_request_id:'PULLED_REQUEST'}]);
+  try {
+    await f.login(); await f.group('GROUP_A',{enabled:true,joinMode:'auto',whitelistMembers:['MEMBER_A']});
+    await f.event('GROUP_JOIN_REQUEST',event);
+    f.store.db.exec("UPDATE records SET status='processing'"); f.store.recover();
+    const before=f.store.records('GROUP_A')[0];
+    assert.equal((await (await f.request('/api/groups/GROUP_A/requests/pull','POST',{})).json()).count,0);
+    await f.engine.drain();
+    assert.deepEqual(f.store.records('GROUP_A'),[before]);
+    assert.equal(calls.filter(c=>c.path.includes('/approval_join_request/')).length,0);
+  } finally { f.store.close(); }
+});
+
+test('admission dedup accepts epoch time and tolerates malformed historical payloads',async()=>{
+  const f=fixture(), event={...application(),apply_at:'1970-01-01T00:00:00Z'};
+  try {
+    await f.login(); await f.group();
+    await f.event('GROUP_JOIN_REQUEST',event);
+    assert.equal(f.store.records('GROUP_A')[0].occurredAt,0);
+    await f.event('GROUP_JOIN_REQUEST',{...event,join_request_id:'EPOCH_COPY'});
+    assert.equal(f.store.records('GROUP_A').length,1);
+    f.store.db.prepare('UPDATE records SET payload=?').run('invalid JSON');
+    assert.equal((await f.event('GROUP_JOIN_REQUEST',{...event,join_request_id:'NEW_REQUEST'})).status,200);
+    assert.equal(f.store.records('GROUP_A').length,2);
+  } finally { f.store.close(); }
+});
+
+test('changed risk information on the same admission stops queued automatic approval',async t=>{
+  for(const firstRisk of ['', '需核对安全风险']) await t.test(firstRisk || 'initially clear',async t=>{
+    const f=fixture(), event={...application(),apply_at:'2026-10-28T13:46:11+08:00',risk_tips:firstRisk};
+    const calls=fakeQQ(t,undefined,[{...event,join_request_id:'PULLED_REQUEST',risk_tips:firstRisk ? '' : '需核对安全风险'}]);
+    try {
+      await f.login(); await f.group('GROUP_A',{enabled:true,joinMode:'auto',whitelistMembers:['MEMBER_A']});
+      await f.event('GROUP_JOIN_REQUEST',event);
+      assert.equal((await (await f.request('/api/groups/GROUP_A/requests/pull','POST',{})).json()).count,1);
+      await f.engine.drain();
+      const records=f.store.records('GROUP_A');
+      assert.equal(records.length,2,'conflicting risk reports remain available for review');
+      assert.ok(records.every(record=>record.status==='review'));
+      assert.equal(calls.filter(c=>c.path.includes('/approval_join_request/')).length,0);
+    } finally { f.store.close(); }
+  });
 });
 
 test('risky, missing and ambiguous answers stay manual; normalized names and student IDs match deterministically',async()=>{

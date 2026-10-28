@@ -7,6 +7,13 @@ import { QQClient, QQError } from './qq.js';
 
 const safeError=(e:unknown) => e instanceof QQError ? e.message : e instanceof Error && e.name==='TimeoutError' ? 'QQ 请求超时，结果可能已生效，请在 QQ 核实后再重试' : '执行结果未确认，请检查网络和权限，并在 QQ 核实后再重试';
 
+const joinDetails=(event:JoinEvent) => {
+  const time=Date.parse(event.apply_at??'');
+  if(!Number.isFinite(time) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(event.apply_at??'')) return null;
+  return {time,risk:event.risk_tips??'',key:JSON.stringify([time,event.apply_source??'',event.invited_by??'',event.bot??false,event.auto_approved??null,
+    event.verify_info?.method??'',event.verify_info?.verify_message??'',event.verify_info?.review_qa_list??[]])};
+};
+
 export class Engine {
   private running = false;
   private syncing = new Set<string>();
@@ -24,24 +31,46 @@ export class Engine {
       }
     }
   }
-  private once(groupId: string, kind: string, externalId: string, fn: (group:Group)=>void) {
+  private once(groupId: string, kind: string, externalId: string, fn: (group:Group)=>boolean|void) {
     const key=createHash('sha256').update(`${kind}:${groupId}:${externalId}`).digest('hex');
-    this.store.transaction(()=>{
-      if(this.store.db.prepare('SELECT id FROM seen WHERE id=?').get(key)) return;
+    return this.store.transaction(()=>{
+      if(this.store.db.prepare('SELECT id FROM seen WHERE id=?').get(key)) return false;
       this.store.discover(groupId);
-      fn(this.store.group(groupId)!);
+      const created=fn(this.store.group(groupId)!)!==false;
       this.store.db.prepare('INSERT INTO seen(id,created_at) VALUES(?,?)').run(key,Date.now());
+      return created;
     });
   }
   ingestJoin(event: JoinEvent) {
-    this.once(event.group_openid,'join',event.join_request_id,group=>{
+    return this.once(event.group_openid,'join',event.join_request_id,group=>{
+      const details=joinDetails(event);
+      let riskChanged=false;
+      const riskReason='QQ 对同一申请返回了不同的风险提示，已暂停自动审批，请人工核对';
+      if(details!==null) {
+        // QQ can return different opaque IDs for the same application on callback and pull.
+        // shortcut: identical reapplications within QQ's timestamp precision cannot be distinguished; use a stable platform ID if provided.
+        const candidates=this.store.db.prepare("SELECT id,payload FROM records WHERE group_id=? AND kind='join' AND member_openid=? AND occurred_at=?")
+          .all(group.id,event.member_openid,details.time);
+        const matching=candidates.flatMap(row=>{
+          let payload:unknown;
+          try { payload=JSON.parse(String(row.payload)); } catch { return []; }
+          const parsed=joinEventSchema.safeParse(payload);
+          const previous=parsed.success ? joinDetails(parsed.data) : null;
+          return previous?.key===details.key ? [{id:Number(row.id),risk:previous.risk}] : [];
+        });
+        riskChanged=matching.some(row=>row.risk!==details.risk);
+        if(riskChanged) for(const row of matching) {
+          this.store.db.prepare("UPDATE records SET status='review',reason=? WHERE id=? AND status='queued'").run(riskReason,row.id);
+        }
+        if(matching.some(row=>row.risk===details.risk)) return false;
+      }
       const result=decideJoin(event,group.settings,this.store.roster(group.id));
       const automatic=group.settings.enabled && group.settings.joinMode==='auto';
-      const status:RecordStatus=event.auto_approved ? 'succeeded' : automatic && ['approve','decline'].includes(result.decision) ? 'queued' : 'review';
+      const status:RecordStatus=event.auto_approved ? 'succeeded' : !riskChanged && automatic && ['approve','decline'].includes(result.decision) ? 'queued' : 'review';
       const content=event.verify_info?.method==='admin_review_qa' ? event.verify_info.review_qa_list?.map(p=>`${p.question}：${p.answer}`).join('\n') ?? '' : event.verify_info?.verify_message ?? '未提供验证信息';
-      this.store.insertRecord({groupId:group.id,kind:'join',externalId:event.join_request_id,memberOpenid:event.member_openid,username:event.username,
-        content,payload:JSON.stringify(event),reason:event.auto_approved ? 'QQ 官方白名单策略已自动通过，本地未重复审批' : !automatic ? `人工审核：${result.reason}` : result.reason,
-        decision:event.auto_approved ? 'approve' : result.decision,status,occurredAt:Date.parse(event.apply_at??'') || Date.now(),automatic,revision:group.revision,personId:result.personId??null});
+      return this.store.insertRecord({groupId:group.id,kind:'join',externalId:event.join_request_id,memberOpenid:event.member_openid,username:event.username,
+        content,payload:JSON.stringify(event),reason:event.auto_approved ? 'QQ 官方白名单策略已自动通过，本地未重复审批' : riskChanged ? riskReason : !automatic ? `人工审核：${result.reason}` : result.reason,
+        decision:event.auto_approved ? 'approve' : result.decision,status,occurredAt:details?.time??Date.now(),automatic,revision:group.revision,personId:result.personId??null});
     });
   }
   private ingestMessage(message: MessageData) {
@@ -160,7 +189,7 @@ export class Engine {
       const parsed=z.object({list:z.array(z.unknown()),next_cursor:z.string().default('')}).parse(data);
       for(const item of parsed.list) {
         const event=joinEventSchema.parse({...z.record(z.string(),z.unknown()).parse(item),group_openid:groupId});
-        this.ingestJoin(event); count++;
+        if(this.ingestJoin(event)) count++;
       }
       cursor=parsed.next_cursor;
       if(!cursor) return count;
